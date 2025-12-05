@@ -124,7 +124,7 @@ check_system() {
   esac
 }
 
-################################ 代理解析与校验（通用方法） ################################
+################################ 代理解析与校验 ################################
 
 # 校验 IP 地址格式（每段 0-255）
 # 返回 0 表示有效，1 表示无效
@@ -443,7 +443,7 @@ upgrade_go_version() {
   
   mkdir -p "${tmp_dir}"
   
-  # 下载 Go（优先使用国内镜像加速）
+  # 下载 Go，优先使用国内镜像加速
   local download_urls=(
     "https://mirrors.aliyun.com/golang/${go_tar}" # 阿里云镜像
     "https://golang.google.cn/dl/${go_tar}"       # Google 中国镜像
@@ -454,7 +454,7 @@ upgrade_go_version() {
   for url in "${download_urls[@]}"; do
     log "尝试下载：${url}"
     if curl -L --connect-timeout 10 --max-time 300 -o "${tmp_dir}/${go_tar}" "${url}" 2>/dev/null; then
-      # 验证下载的文件是否有效（检查文件大小 > 50MB）
+      # 验证下载的文件是否有效，检查文件大小是否大于 50MB
       local file_size
       file_size=$(stat -c%s "${tmp_dir}/${go_tar}" 2>/dev/null || echo "0")
       if [ "${file_size}" -gt 50000000 ]; then
@@ -579,7 +579,7 @@ install_graftcp() {
   mkdir -p "${GRAFTCP_DIR}"
 
   if [ ! -d "${GRAFTCP_DIR}/.git" ]; then
-    log "克隆 graftcp 仓库（官方 GitHub）..."
+    log "克隆 graftcp 仓库..."
     git clone https://github.com/hmgle/graftcp.git "${GRAFTCP_DIR}" | tee -a "${INSTALL_LOG}"
   else
     log "检测到已有 graftcp 仓库，尝试更新..."
@@ -590,13 +590,13 @@ install_graftcp() {
 
   # 临时加速 Go 依赖（GOPROXY），仅针对本次 make 生效，不影响全局环境
   if [ -z "${GOPROXY:-}" ]; then
-    log "为编译临时设置 GOPROXY=https://goproxy.cn,direct 加速 go 依赖下载（仅本次生效）。"
+    log "为编译临时设置 GOPROXY=https://goproxy.cn,direct 加速 go 依赖下载（仅本次运行生效）。"
     GOPROXY_ENV="GOPROXY=https://goproxy.cn,direct"
   else
     GOPROXY_ENV=""
   fi
 
-  # 兼容旧版本 Go：删除 go.mod 中的 toolchain 指令（Go 1.21+ 新增，旧版本无法识别）
+  # 兼容旧版本 Go：删除 go.mod 中的 toolchain 指令
   if [ "${NEED_GO_COMPAT}" = "true" ]; then
     log "兼容模式：移除 go.mod 中的 toolchain 指令..."
     for gomod in go.mod local/go.mod; do
@@ -607,7 +607,7 @@ install_graftcp() {
     done
   fi
 
-  # 检查并转换不兼容的代理协议（Go 不支持 socks5h:// 等协议）
+  # 检查并转换不兼容的代理协议
   # 不清除环境变量，而是转换为兼容格式，保持用户代理配置的意图
   local proxy_vars=("ALL_PROXY" "all_proxy" "HTTPS_PROXY" "https_proxy" "HTTP_PROXY" "http_proxy")
   local proxy_fixed="false"
@@ -657,7 +657,7 @@ find_language_server() {
   # 构建搜索路径列表（按优先级排序）
   local search_paths=()
   
-  # 1. 当前用户的 .antigravity-server 目录（最常见）
+  # 1. 优先当前用户的 .antigravity-server 目录
   search_paths+=("${HOME}/.antigravity-server")
   
   # 2. 如果 HOME 不是 /root，也搜索 /root（可能以 sudo 运行）
@@ -678,15 +678,24 @@ find_language_server() {
   fi
   
   # 4. 用户主目录的其他位置，兜底
-  search_paths+=("${HOME}")
+  if [ ! -d "${HOME}/.antigravity-server" ]; then
+    search_paths+=("${HOME}")
+  fi
+  
+  # 用于去重的关联数组
+  declare -A seen_paths
   
   # 遍历搜索路径
   for base in "${search_paths[@]}"; do
     if [ -d "${base}" ]; then
       log "搜索目录：${base}"
       while IFS= read -r path; do
-        candidates+=("${path}")
-        log "  找到：${path}"
+        # 去重：检查是否已经添加过
+        if [ -z "${seen_paths[${path}]:-}" ]; then
+          seen_paths["${path}"]=1
+          candidates+=("${path}")
+          log "  找到：${path}"
+        fi
       done < <(find "${base}" -maxdepth 10 -type f -path "*extensions/antigravity/bin/${pattern}*" 2>/dev/null)
     fi
   done
@@ -799,6 +808,83 @@ EOF
   log "已生成代理 wrapper：${TARGET_BIN}"
 }
 
+################################ 测试代理连通性 ################################
+
+test_proxy() {
+  echo ""
+  echo "============================================="
+  echo " 正在测试代理连通性..."
+  echo "============================================="
+  
+  # 先启动 graftcp-local
+  log "启动 graftcp-local 进行测试..."
+  
+  # 停止可能存在的旧进程
+  pkill -f "${GRAFTCP_DIR}/local/graftcp-local" 2>/dev/null || true
+  sleep 0.5
+  
+  # 启动 graftcp-local
+  if [ "${PROXY_TYPE}" = "http" ]; then
+    "${GRAFTCP_DIR}/local/graftcp-local" -http_proxy="${PROXY_URL}" -select_proxy_mode=only_http_proxy &
+  else
+    "${GRAFTCP_DIR}/local/graftcp-local" -socks5="${PROXY_URL}" -select_proxy_mode=only_socks5 &
+  fi
+  local graftcp_local_pid=$!
+  sleep 1
+  
+  # 检查 graftcp-local 是否成功启动
+  if ! kill -0 "${graftcp_local_pid}" 2>/dev/null; then
+    warn "graftcp-local 启动失败"
+    echo ""
+    echo "❌ 代理测试失败：graftcp-local 无法启动"
+    echo ""
+    echo "可能原因："
+    echo "  1. 端口被占用"
+    echo "  2. graftcp 编译有问题"
+    echo ""
+    echo "如需调整，请重新执行脚本。"
+    exit 1
+  fi
+  
+  # 使用 graftcp 测试访问 google.com
+  log "测试通过代理访问 google.com..."
+  local test_result
+  if "${GRAFTCP_DIR}/graftcp" curl -s --connect-timeout 10 --max-time 15 -o /dev/null -w "%{http_code}" "https://www.google.com" 2>/dev/null; then
+    test_result=$?
+  else
+    test_result=$?
+  fi
+  
+  # 获取 HTTP 状态码
+  local http_code
+  http_code=$("${GRAFTCP_DIR}/graftcp" curl -s --connect-timeout 10 --max-time 15 -o /dev/null -w "%{http_code}" "https://www.google.com" 2>/dev/null || echo "000")
+  
+  # 停止测试用的 graftcp-local
+  kill "${graftcp_local_pid}" 2>/dev/null || true
+  
+  # 判断测试结果
+  if [ "${http_code}" = "200" ] || [ "${http_code}" = "301" ] || [ "${http_code}" = "302" ]; then
+    echo ""
+    echo "✅ 代理测试成功！"
+    echo "   已成功通过代理访问 google.com (HTTP ${http_code})"
+    echo ""
+    return 0
+  else
+    echo ""
+    echo "❌ 代理测试失败！"
+    echo "   无法通过代理访问 google.com (HTTP ${http_code})"
+    echo ""
+    echo "可能原因："
+    echo "  1. 代理服务器未启动或不可用"
+    echo "  2. 代理地址配置错误：${PROXY_TYPE}://${PROXY_URL}"
+    echo "  3. 代理服务器无法访问外网"
+    echo "  4. 网络连接问题"
+    echo ""
+    echo "如需调整代理配置，请重新执行脚本。"
+    exit 1
+  fi
+}
+
 ################################ 主流程 ################################
 
 main() {
@@ -813,6 +899,7 @@ main() {
   install_graftcp
   find_language_server
   setup_wrapper
+  test_proxy
 
   echo
   echo "=================== 配置完成 🎉 ==================="
