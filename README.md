@@ -16,7 +16,7 @@
 
 ```bash
 curl -O https://raw.githubusercontent.com/ccpopy/antissh/main/antissh.sh
-# 或者加速下载
+# 或者国内加速下载
 # curl -O https://ghproxy.net/https://raw.githubusercontent.com/ccpopy/antissh/main/antissh.sh
 chmod +x antissh.sh
 ```
@@ -79,3 +79,7 @@ mv /path/to/language_server_xxx.bak /path/to/language_server_xxx
 
 - [graftcp](https://github.com/hmgle/graftcp)
 - [思路来源](https://www.v2ex.com/t/1174113)
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=ccpopy/antissh&type=date&legend=top-left)](https://www.star-history.com/#ccpopy/antissh&type=date&legend=top-left)
