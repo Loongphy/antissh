@@ -184,7 +184,7 @@ parse_proxy_url() {
   PARSE_ERROR=""
   
   # 检查是否包含协议前缀
-  if ! echo "${input}" | grep -Eq '^(socks5|http)://'; then
+  if ! echo "${input}" | grep -Eq '^(socks5h?|https?|http)://'; then
     PARSE_ERROR="代理地址必须以 socks5:// 或 http:// 开头"
     return 1
   fi
@@ -198,7 +198,13 @@ parse_proxy_url() {
     socks5)
       PROXY_TYPE="socks5"
       ;;
-    http)
+    socks5h)
+      # socks5h = socks5 with remote DNS resolution
+      # graftcp 不支持 socks5h，自动转换为 socks5
+      echo "⚠️  检测到 socks5h:// 协议，将自动转换为 socks5://"
+      PROXY_TYPE="socks5"
+      ;;
+    http|https)
       PROXY_TYPE="http"
       ;;
     *)
@@ -350,6 +356,9 @@ detect_pkg_manager() {
   fi
 }
 
+# 全局变量：是否需要兼容旧版本 Go（移除 toolchain 指令）
+NEED_GO_COMPAT="false"
+
 check_go_version() {
   if ! command -v go >/dev/null 2>&1; then
     # 缺 go 的情况交给依赖安装逻辑
@@ -369,6 +378,109 @@ check_go_version() {
   fi
   
   log "Go 版本检查通过：${gv_raw}"
+  
+  # 检查是否需要升级 Go（< 1.21 时 go.mod 的 toolchain 指令不被支持）
+  if [ "${major}" -eq 1 ] && [ "${minor}" -lt 21 ]; then
+    echo ""
+    echo "============================================="
+    echo " 检测到 Go 版本：${gv_raw}"
+    echo "============================================="
+    echo ""
+    echo " graftcp 项目使用了 Go 1.21+ 的 toolchain 指令。"
+    echo " 当前版本可以通过兼容模式编译，但建议升级到 Go 1.21+。"
+    echo ""
+    echo " 升级 Go 的影响："
+    echo "   ✓ 更好的性能和安全性"
+    echo "   ✓ 原生支持新版 go.mod 语法"
+    echo "   ✗ 可能影响系统上依赖旧版 Go 的其他项目"
+    echo "   ✗ 需要下载约 150MB 的 Go 安装包"
+    echo ""
+    echo " 不升级（兼容模式）："
+    echo "   ✓ 不影响现有环境"
+    echo "   ✓ 自动移除 go.mod 中的 toolchain 指令后编译"
+    echo ""
+    read -r -p "是否升级 Go 到最新版本？ [y/N]（默认 N，使用兼容模式）: " upgrade_go
+    
+    case "${upgrade_go}" in
+      [Yy]*)
+        upgrade_go_version
+        ;;
+      *)
+        log "使用兼容模式，将在编译前移除 toolchain 指令。"
+        NEED_GO_COMPAT="true"
+        ;;
+    esac
+  fi
+}
+
+# 升级 Go 到最新稳定版
+upgrade_go_version() {
+  log "开始升级 Go..."
+  
+  # 检测系统架构
+  local arch
+  case "$(uname -m)" in
+    x86_64)  arch="amd64" ;;
+    aarch64) arch="arm64" ;;
+    armv7l)  arch="armv6l" ;;
+    *)       error "不支持的系统架构：$(uname -m)" ;;
+  esac
+  
+  # 获取最新 Go 版本号（从官方 API）
+  log "获取最新 Go 版本..."
+  local latest_version
+  latest_version=$(curl -sL "https://go.dev/VERSION?m=text" 2>/dev/null | head -1)
+  
+  if [ -z "${latest_version}" ]; then
+    # 备用方案：使用固定的稳定版本
+    latest_version="go1.22.5"
+    warn "无法获取最新版本，使用备用版本：${latest_version}"
+  fi
+  
+  log "将安装 Go 版本：${latest_version}"
+  
+  local go_tar="${latest_version}.linux-${arch}.tar.gz"
+  local download_url="https://go.dev/dl/${go_tar}"
+  local tmp_dir="${INSTALL_ROOT}/tmp"
+  
+  mkdir -p "${tmp_dir}"
+  
+  # 下载 Go
+  log "下载 ${download_url}..."
+  if ! curl -L -o "${tmp_dir}/${go_tar}" "${download_url}"; then
+    error "下载 Go 失败，请检查网络连接。"
+  fi
+  
+  # 备份旧版本（如果存在）
+  if [ -d "/usr/local/go" ]; then
+    log "备份旧版 Go 到 /usr/local/go.bak..."
+    ${SUDO} rm -rf /usr/local/go.bak 2>/dev/null || true
+    ${SUDO} mv /usr/local/go /usr/local/go.bak
+  fi
+  
+  # 解压新版本
+  log "安装 Go 到 /usr/local/go..."
+  ${SUDO} tar -C /usr/local -xzf "${tmp_dir}/${go_tar}"
+  
+  # 更新 PATH（如果需要）
+  if ! echo "${PATH}" | grep -q "/usr/local/go/bin"; then
+    export PATH="/usr/local/go/bin:${PATH}"
+    log "已临时添加 /usr/local/go/bin 到 PATH"
+    echo ""
+    echo "提示：请将以下行添加到 ~/.bashrc 或 ~/.profile 以永久生效："
+    echo "  export PATH=/usr/local/go/bin:\$PATH"
+    echo ""
+  fi
+  
+  # 清理临时文件
+  rm -f "${tmp_dir}/${go_tar}"
+  
+  # 验证安装
+  local new_version
+  new_version="$(/usr/local/go/bin/go version 2>/dev/null | awk '{print $3}')"
+  log "Go 升级完成：${new_version}"
+  
+  NEED_GO_COMPAT="false"
 }
 
 ensure_dependencies() {
@@ -462,11 +574,33 @@ install_graftcp() {
   fi
 
   # 兼容旧版本 Go：删除 go.mod 中的 toolchain 指令（Go 1.21+ 新增，旧版本无法识别）
-  log "检查并移除 go.mod 中的 toolchain 指令（兼容 Go < 1.21）..."
-  for gomod in go.mod local/go.mod; do
-    if [ -f "${gomod}" ] && grep -q '^toolchain' "${gomod}"; then
-      log "  移除 ${gomod} 中的 toolchain 行"
-      sed -i '/^toolchain/d' "${gomod}"
+  if [ "${NEED_GO_COMPAT}" = "true" ]; then
+    log "兼容模式：移除 go.mod 中的 toolchain 指令..."
+    for gomod in go.mod local/go.mod; do
+      if [ -f "${gomod}" ] && grep -q '^toolchain' "${gomod}"; then
+        log "  移除 ${gomod} 中的 toolchain 行"
+        sed -i '/^toolchain/d' "${gomod}"
+      fi
+    done
+  fi
+
+  # 检查并转换不兼容的代理协议（Go 不支持 socks5h:// 等协议）
+  # 不清除环境变量，而是转换为兼容格式，保持用户代理配置的意图
+  local proxy_vars=("ALL_PROXY" "all_proxy" "HTTPS_PROXY" "https_proxy" "HTTP_PROXY" "http_proxy")
+  local proxy_fixed="false"
+  for var in "${proxy_vars[@]}"; do
+    local val="${!var:-}"
+    if [ -n "${val}" ]; then
+      # 检查是否包含不兼容协议
+      if echo "${val}" | grep -Eq '^socks5h://'; then
+        # 转换 socks5h -> socks5
+        local new_val="${val/socks5h:\/\//socks5:\/\/}"
+        export "${var}=${new_val}"
+        if [ "${proxy_fixed}" = "false" ]; then
+          log "检测到环境变量使用 socks5h:// 协议（Go 不支持），已临时转换为 socks5://"
+          proxy_fixed="true"
+        fi
+      fi
     fi
   done
 
