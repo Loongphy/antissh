@@ -490,8 +490,9 @@ upgrade_go_version() {
     export PATH="/usr/local/go/bin:${PATH}"
     log "已临时添加 /usr/local/go/bin 到 PATH"
     echo ""
-    echo "提示：请将以下行添加到 ~/.bashrc 或 ~/.profile 以永久生效："
+    echo "⚠️ 提示：请将以下行添加到 ~/.bashrc 或 ~/.profile 以永久生效："
     echo "  export PATH=/usr/local/go/bin:\$PATH"
+    echo "  然后执行 source ~/.bashrc 或 source ~/.profile 使配置生效"
     echo ""
   fi
   
@@ -864,35 +865,85 @@ test_proxy() {
   echo "============================================="
   echo " 正在测试代理连通性..."
   echo "============================================="
-  
-  # 先启动 graftcp-local
-  log "启动 graftcp-local 进行测试..."
-  
-  # 停止可能存在的旧进程
-  pkill -f "${GRAFTCP_DIR}/local/graftcp-local" 2>/dev/null || true
-  sleep 0.5
-  
-  # 启动 graftcp-local
-  if [ "${PROXY_TYPE}" = "http" ]; then
-    "${GRAFTCP_DIR}/local/graftcp-local" -http_proxy="${PROXY_URL}" -select_proxy_mode=only_http_proxy &
-  else
-    "${GRAFTCP_DIR}/local/graftcp-local" -socks5="${PROXY_URL}" -select_proxy_mode=only_socks5 &
+
+  # graftcp-local 默认监听端口
+  local GRAFTCP_LOCAL_PORT="2233"
+
+  # 检查端口是否被占用
+  local port_in_use="false"
+  local port_pid=""
+  local port_process=""
+
+  if command -v ss >/dev/null 2>&1; then
+    port_pid=$(ss -tlnp 2>/dev/null | grep ":${GRAFTCP_LOCAL_PORT} " | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -1)
+  elif command -v netstat >/dev/null 2>&1; then
+    port_pid=$(netstat -tlnp 2>/dev/null | grep ":${GRAFTCP_LOCAL_PORT} " | awk '{print $7}' | cut -d'/' -f1 | head -1)
   fi
-  local graftcp_local_pid=$!
-  sleep 1
-  
-  # 检查 graftcp-local 是否成功启动
-  if ! kill -0 "${graftcp_local_pid}" 2>/dev/null; then
-    warn "graftcp-local 启动失败"
-    echo ""
-    echo "❌ 代理测试失败：graftcp-local 无法启动"
-    echo ""
-    echo "可能原因："
-    echo "  1. 端口被占用"
-    echo "  2. graftcp 编译有问题"
-    echo ""
-    echo "如需调整，请重新执行脚本。"
-    exit 1
+
+  if [ -n "${port_pid}" ]; then
+    port_in_use="true"
+    port_process=$(ps -p "${port_pid}" -o comm= 2>/dev/null || echo "unknown")
+  fi
+
+  # 如果端口被占用，检查是否是 graftcp-local 服务
+  if [ "${port_in_use}" = "true" ]; then
+    log "检测到端口 ${GRAFTCP_LOCAL_PORT} 已被占用 (PID: ${port_pid}, 进程: ${port_process})"
+
+    # 检查是否是 graftcp-local 进程
+    local is_graftcp_local="false"
+    if [ "${port_process}" = "graftcp-local" ]; then
+      is_graftcp_local="true"
+    elif ps -p "${port_pid}" -o args= 2>/dev/null | grep -q "graftcp-local"; then
+      is_graftcp_local="true"
+    fi
+
+    if [ "${is_graftcp_local}" = "true" ]; then
+      log "端口 ${GRAFTCP_LOCAL_PORT} 已被 graftcp-local 服务占用，将直接进行代理测试"
+    else
+      echo ""
+      echo "❌ 代理测试失败：端口 ${GRAFTCP_LOCAL_PORT} 被其他进程占用"
+      echo ""
+      echo "占用信息："
+      echo "  端口：${GRAFTCP_LOCAL_PORT}"
+      echo "  PID：${port_pid}"
+      echo "  进程：${port_process}"
+      echo ""
+      echo "解决方法："
+      echo "  1. 停止占用该端口的进程：kill ${port_pid}"
+      echo "  2. 或修改 graftcp-local 的监听端口（需手动配置）"
+      echo ""
+      exit 1
+    fi
+  else
+    # 端口未被占用，启动 graftcp-local
+    log "启动 graftcp-local 进行测试..."
+
+    # 停止可能存在的旧进程
+    pkill -f "${GRAFTCP_DIR}/local/graftcp-local" 2>/dev/null || true
+    sleep 0.5
+
+    # 启动 graftcp-local
+    if [ "${PROXY_TYPE}" = "http" ]; then
+      "${GRAFTCP_DIR}/local/graftcp-local" -http_proxy="${PROXY_URL}" -select_proxy_mode=only_http_proxy &
+    else
+      "${GRAFTCP_DIR}/local/graftcp-local" -socks5="${PROXY_URL}" -select_proxy_mode=only_socks5 &
+    fi
+    local graftcp_local_pid=$!
+    sleep 1
+
+    # 检查 graftcp-local 是否成功启动
+    if ! kill -0 "${graftcp_local_pid}" 2>/dev/null; then
+      warn "graftcp-local 启动失败"
+      echo ""
+      echo "❌ 代理测试失败：graftcp-local 无法启动"
+      echo ""
+      echo "可能原因："
+      echo "  1. graftcp 编译有问题"
+      echo "  2. 系统权限不足"
+      echo ""
+      echo "如需调整，请重新执行脚本。"
+      exit 1
+    fi
   fi
   
   # 使用 graftcp 测试访问 google.com
@@ -938,7 +989,7 @@ test_proxy() {
 
 main() {
   echo "==== Antigravity + graftcp 一键配置脚本 ===="
-  echo "支持系统：Linux（macOS 请使用 Proxifier 等替代方案）"
+  echo "支持系统：Linux"
   echo "安装日志：${INSTALL_LOG}"
   echo
 
